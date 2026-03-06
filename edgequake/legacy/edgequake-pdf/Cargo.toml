@@ -1,0 +1,99 @@
+[package]
+name = "edgequake-pdf"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PDF to Markdown extraction with AI enhancement for EdgeQuake"
+
+[[bin]]
+name = "edgequake-pdf"
+path = "src/bin.rs"
+
+[features]
+# WHY: PdfiumBackend is the sole extraction backend (IT31: lopdf removed).
+# PDFium (Chromium's PDF engine) provides:
+# - Accurate character positions and bounding boxes
+# - Font descriptor flags for reliable bold/italic detection
+# - F1 >= 0.95 on gold standard tests
+default = ["pdfium"]
+# pdfium backend for accurate text extraction (requires libpdfium at runtime)
+pdfium = ["dep:pdfium-render"]
+# Vision mode with PDF page rendering (uses pdftoppm from poppler-utils)
+# Requires: brew install poppler (macOS) or apt-get install poppler-utils (Linux)
+vision = []
+
+# Test execution features for performance optimization
+# **Why split tests:**
+# - `cargo test` runs only smoke tests (<5s) for instant feedback
+# - `cargo test --features slow-tests` adds basic feature tests (<30s)
+# - `cargo test --all-features` includes comprehensive quality tests (2+ min)
+#
+# **First Principles:**
+# Fast feedback loops improve developer productivity. Most changes need
+# smoke tests only. Feature tests for integration. Comprehensive for releases.
+slow-tests = []
+comprehensive-tests = []
+
+[dependencies]
+# Workspace dependencies
+edgequake-llm.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow.workspace = true
+futures.workspace = true
+
+# pdfium-render - Rust bindings to Google's PDFium for accurate text extraction
+# WHY: PDFium provides character-level bounding boxes and accurate positions
+# that lopdf cannot match. License: MIT OR Apache-2.0 (permissive).
+# Requires libpdfium.dylib/so at runtime from bblanchon/pdfium-binaries
+# WHY image_025 (OODA-35 update): edgequake-pdf2md requires image ^0.25, so we
+# align edgequake-pdf to image_025 to avoid pdfium-render feature conflicts
+# (image_024 + image_025 cannot both be enabled in the same crate instance).
+# WHY pdfium_latest: Provides the bindgen definitions for the Pdfium C API.
+pdfium-render = { version = "0.8", optional = true, default-features = false, features = [
+    "thread_safe",
+    "image_025",
+    "pdfium_latest",
+] }
+
+# TrueType font parsing for embedded fonts (cmap table extraction)
+# WHY: Subset TrueType fonts (like Calibri/Cambria in Office PDFs) embed
+# their glyph→Unicode mapping in the cmap table, not in the PDF encoding.
+# ttf-parser: zero-allocation, safe, no_std compatible font parser
+ttf-parser = "0.25"
+
+# Parallel processing for multi-core extraction
+rayon = "1.10"
+
+# R-tree spatial indexing for O(n log n) spatial queries
+rstar = "0.12"
+
+# Image processing (aligned with edgequake-pdf2md's image ^0.25)
+image = "0.25"
+base64 = "0.22"
+regex = "1.10"
+
+# Temporary file handling for PDF bytes
+tempfile = "3.10"
+
+# CLI dependencies
+clap = { version = "4.5", features = ["derive"] }
+
+# Config file support
+toml = "0.8"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "macros", "rt-multi-thread"] }
+chrono = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "extraction_bench"
+harness = false

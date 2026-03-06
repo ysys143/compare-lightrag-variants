@@ -1,0 +1,162 @@
+name: CI
+
+on:
+  push:
+    branches: [main, edgequake-main, "feat/**"]
+  pull_request:
+    branches: [main, edgequake-main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # v0.4.0: pdfium is embedded via pdfium-auto in edgequake-pdf2md 0.4.1.
+  # No external library setup needed. The bundled feature is the default,
+  # so we do NOT use --no-default-features for edgequake-api / pdf-related crates.
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: edgequake
+
+      - name: Check formatting
+        working-directory: edgequake
+        run: cargo fmt --all -- --check
+
+      - name: Check clippy
+        working-directory: edgequake
+        # Use --no-default-features only for non-pdf crates to avoid postgres dep at check time.
+        # The pdf bundled feature embeds pdfium at build time (no external library needed on CI).
+        run: cargo clippy --workspace --lib -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: edgequake
+
+      - name: Run tests
+        working-directory: edgequake
+        # pdfium embedded via pdfium-auto — no external library needed on Ubuntu CI runner.
+        run: cargo test --workspace --lib --no-fail-fast
+        env:
+          # Use mock LLM provider for tests (no API key needed)
+          RUST_LOG: warn
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: edgequake
+
+      - name: Build release
+        working-directory: edgequake
+        # pdfium-auto downloads and embeds pdfium for linux/amd64 at build time.
+        run: cargo build --workspace --release --lib
+
+      # Note: Examples and binaries require postgres feature, tested in postgres-integration.yml
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Free disk space
+        run: |
+          # Remove unused tools to free disk space for coverage generation
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          df -h
+
+      - name: Install cargo-tarpaulin
+        # WHY: Use pre-built binary to avoid compiling native-tls v0.2.17 which fails on Rust 1.85+
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: edgequake
+
+      - name: Generate coverage
+        working-directory: edgequake
+        run: cargo tarpaulin --workspace --timeout 300 --out xml
+        # WHY: continue-on-error - Coverage generation can run out of disk space on GitHub runners
+        continue-on-error: true
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: edgequake/cobertura.xml
+          fail_ci_if_error: false
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run security audit
+        working-directory: edgequake
+        run: cargo audit --ignore RUSTSEC-2023-0071 # Ignore rsa timing issue (no fix available)
+        continue-on-error: true # Don't fail on unmaintained warnings
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: edgequake
+
+      - name: Build docs
+        working-directory: edgequake
+        run: cargo doc --workspace --no-deps
+        env:
+          # Allow unresolved links (FEAT/BR/UC references) but error on other doc warnings
+          RUSTDOCFLAGS: -A rustdoc::broken_intra_doc_links -D warnings

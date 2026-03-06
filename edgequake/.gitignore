@@ -1,0 +1,122 @@
+# Rust build artifacts
+target/
+# WHY: Cargo.lock is committed for the application binary (edgequake/) to ensure
+# reproducible CI builds. SDK libraries ignore their Cargo.lock (standard practice).
+sdks/*/Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# IDE and editor files
+ .idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment files
+.env
+target/
+edgequake/target/
+edgequake/crates/*/target/
+.env.*.local
+*.env
+
+# Log files
+*.log
+lightrag.log*
+logs/
+/.playwright-mcp
+archive/
+specs/
+logf/
+zz_test_docs/
+zz-explore/
+
+# Python artifacts (for LightRAG reference)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+# Don't ignore Next.js lib directory
+!**/src/lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+edgequake_webui/node_modules/
+edgequake_webui/.next/
+edgequake_webui/.turbo/
+edgequake_webui/playwright-report/
+edgequake_webui/build_pid.txt
+edgequake_webui/tsc_output.txt
+edgequake_webui/tsc_pid.txt
+node_modules/
+# Node.js (for webui)
+node_modules/
+.bun/
+bun.lockb
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Database and storage
+*.db
+*.sqlite
+*.sqlite3
+rag_storage/
+temp/
+inputs/
+*.index
+postgres_data/
+pgdata/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Documentation build
+site/
+_build/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# Kubernetes secrets
+k8s-deploy/secrets/
+
+# Configuration with secrets
+config.ini
+*.pem
+*.key
+
+open-webui/
+
+# Exploration and scratch work
+zz-explore/
+
+# OS files
+Thumbs.db
+ehthumbs.db
+specs/
+./metals
