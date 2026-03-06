@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"git diff --stat\",\"description\":\"Show diff stats for staged/unstaged changes\"}",
+  "error": "Exit code 129\nwarning: Not a git repository. Use --no-index to compare two paths outside a working tree\n사용법: git diff --no-index [<options>] <path> <path>\n\nDiff output format options\n    -p, --patch           generate patch\n    -s, --no-patch        diff를 출력하지 않습니다\n    -u                    generate patch\n    -U, --unified[=<n>]   generate diffs with <n> lines context\n    -W, --[no-]function-context\n                          generate diffs with <n> lines context\n    --raw                 generat...",
+  "timestamp": "2026-03-06T18:41:32.094Z",
+  "retry_count": 1
+}
