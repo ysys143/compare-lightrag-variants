@@ -1,6 +1,6 @@
-# Query-Time Pipeline 비교: LightRAG vs RAG-Anything vs EdgeQuake
+# Query-Time Pipeline 비교: LightRAG vs RAG-Anything vs ApeRAG vs EdgeQuake
 
-**작성일:** 2026-03-06
+**작성일:** 2026-03-06 (ApeRAG 추가: 2026-03-23)
 **분석 범위:** 소스코드 레벨 query-time logic 전체 추적
 
 ---
@@ -11,6 +11,7 @@
 2. [Stage 1: 키워드 추출](#2-stage-1-키워드-추출)
 3. [Stage 2: 쿼리 모드 디스패치](#3-stage-2-쿼리-모드-디스패치)
 4. [Stage 3: 그래프 탐색](#4-stage-3-그래프-탐색)
+    - 4.6 [ApeRAG 그래프 탐색 — PGOpsSyncGraphStorage 성능 분석](#46-aperag-그래프-탐색--pgopssyncstorage-성능-분석)
 5. [Stage 4: 프루닝 & 토큰 버짓](#5-stage-4-프루닝--토큰-버짓)
 6. [Stage 5: 컨텍스트 조립](#6-stage-5-컨텍스트-조립)
 7. [Stage 6: 최종 LLM 프롬프트 & 응답 생성](#7-stage-6-최종-llm-프롬프트--응답-생성)
@@ -64,15 +65,16 @@ User Query
 
 ### 프레임워크별 주요 차이
 
-| 단계 | LightRAG | RAG-Anything | EdgeQuake |
-|------|----------|-------------|-----------|
-| 키워드 추출 | LLM (JSON 응답) | LightRAG 그대로 | LLM + **query intent 분류** |
-| 모드 선택 | 수동 (파라미터) | LightRAG 그대로 | **자동 (intent 기반)** |
-| 그래프 탐색 | 벡터 → 1-hop | LightRAG 그대로 | 벡터 → 1-hop + **배치 최적화** |
-| 프루닝 | 토큰 기반 절삭 | LightRAG 그대로 | 토큰 기반 + **BM25 리랭킹** |
-| 컨텍스트 포맷 | JSON 블록 | LightRAG 그대로 | **Markdown 블록** |
-| 멀티모달 | 없음 | **텍스트 변환 + VLM 호출** | 없음 |
-| 캐싱 | 키워드 + 응답 | 키워드 + 응답 + **멀티모달** | 키워드 (**24h TTL**) |
+| 단계 | LightRAG | RAG-Anything | ApeRAG | EdgeQuake |
+|------|----------|-------------|--------|-----------|
+| 키워드 추출 | LLM (JSON 응답) | LightRAG 그대로 | LightRAG 그대로 (수정 버전) | LLM + **query intent 분류** |
+| 모드 선택 | 수동 (파라미터) | LightRAG 그대로 | LightRAG 그대로 (수동) | **자동 (intent 기반)** |
+| 그래프 탐색 | 벡터 → 1-hop | LightRAG 그대로 | LightRAG 그대로 (수정 버전) | 벡터 → 1-hop + **배치 최적화** |
+| 프루닝 | 토큰 기반 절삭 | LightRAG 그대로 | LightRAG 그대로 | 토큰 기반 + **BM25 리랭킹** |
+| 컨텍스트 포맷 | JSON 블록 | LightRAG 그대로 | LightRAG 그대로 (JSON) | **Markdown 블록** |
+| 멀티모달 | 없음 | **텍스트 변환 + VLM 호출** | Vision 인덱스 병렬 검색 | 없음 |
+| 캐싱 | 키워드 + 응답 | 키워드 + 응답 + **멀티모달** | **Redis** 기반 (키워드 + 응답) | 키워드 (**24h TTL**) |
+| 풀텍스트 검색 | 없음 | 없음 | **Elasticsearch** 병렬 검색 | BM25 리랭킹 (post-retrieval) |
 
 ---
 
@@ -181,17 +183,27 @@ SOTAQueryEngine::validate_keywords()
 // → 임베딩 희석 방지
 ```
 
-### 2.3 키워드 추출 비교
+### 2.3 ApeRAG
 
-| 측면 | LightRAG / RAG-Anything | EdgeQuake |
-|------|------------------------|-----------|
-| 출력 필드 | 2개 (hl, ll) | **3개 (hl, ll, intent)** |
-| 예시 수 | 3개 | 4개 |
-| 의도 분류 | 없음 | **5가지 (factual/relational/exploratory/comparative/procedural)** |
-| 캐시 TTL | 무기한 (수동 삭제) | **24시간** |
-| 키워드 검증 | 없음 | **그래프 존재 여부 확인** |
-| LLM 프로바이더 오버라이드 | 없음 | **사용자 선택 LLM 전파** |
-| JSON 오류 복구 | 기본 파싱 | **정규식 기반 자동 수정** (따옴표 변환, trailing comma 제거) |
+ApeRAG는 수정된 LightRAG를 사용하므로 키워드 추출 방식이 LightRAG / RAG-Anything과 거의 동일하다. 주요 차이점은 Redis 캐싱 레이어가 추가된 것이다.
+
+**파일:** `aperag/index/graph_index.py` (LightRAG 래퍼를 통해 호출)
+
+- 동일한 `high_level_keywords` + `low_level_keywords` 2개 필드 출력
+- Redis 캐시를 통해 동일 쿼리의 LLM 호출 중복 방지
+- query intent 분류 없음 → 모드 선택은 수동
+
+### 2.4 키워드 추출 비교
+
+| 측면 | LightRAG / RAG-Anything | ApeRAG | EdgeQuake |
+|------|------------------------|--------|-----------|
+| 출력 필드 | 2개 (hl, ll) | 2개 (hl, ll) — LightRAG 동일 | **3개 (hl, ll, intent)** |
+| 예시 수 | 3개 | 3개 (LightRAG 동일) | 4개 |
+| 의도 분류 | 없음 | 없음 | **5가지 (factual/relational/exploratory/comparative/procedural)** |
+| 캐시 TTL | 무기한 (수동 삭제) | **Redis** (설정 가능) | **24시간** |
+| 키워드 검증 | 없음 | 없음 | **그래프 존재 여부 확인** |
+| LLM 프로바이더 오버라이드 | 없음 | 없음 | **사용자 선택 LLM 전파** |
+| JSON 오류 복구 | 기본 파싱 | 기본 파싱 | **정규식 기반 자동 수정** (따옴표 변환, trailing comma 제거) |
 
 ---
 
@@ -426,6 +438,123 @@ vector_storage.query(embeddings.query, max_chunks * 2)
     → filter to chunk vectors only
     → take top 20
 ```
+
+---
+
+### 4.6 ApeRAG 그래프 탐색 — PGOpsSyncGraphStorage 성능 분석
+
+ApeRAG는 수정된 LightRAG를 사용하므로 **탐색 알고리즘**(벡터 검색 → 1-hop 이웃 수집)은 LightRAG와 동일하다. 그러나 스토리지 백엔드가 Neo4j/NetworkX가 아닌 **PostgreSQL 관계형 테이블**이기 때문에, 실제 그래프 연산이 어떻게 구현되는지 별도로 분석한다.
+
+**관련 파일:**
+- `aperag/aperag/graph/lightrag/kg/pg_ops_sync_graph_storage.py` — async 래퍼
+- `aperag/aperag/db/repositories/graph.py` — 실제 SQL 구현
+
+#### 4.6.1 1-hop 탐색 — 효율적
+
+탐색의 핵심 연산인 `get_nodes_edges_batch()`는 UNION ALL + `ANY(:node_ids)`로 **1번의 쿼리**에 N개 노드의 모든 인접 엣지를 가져온다:
+
+```sql
+-- graph.py:482-504
+WITH node_list AS (SELECT unnest(:node_ids) AS entity_id),
+outgoing_edges AS (
+    SELECT e.source_entity_id AS node_id, e.source_entity_id, e.target_entity_id
+    FROM lightrag_graph_edges e
+    WHERE e.workspace = :workspace AND e.source_entity_id = ANY(:node_ids)
+),
+incoming_edges AS (
+    SELECT e.target_entity_id AS node_id, e.source_entity_id, e.target_entity_id
+    FROM lightrag_graph_edges e
+    WHERE e.workspace = :workspace AND e.target_entity_id = ANY(:node_ids)
+)
+SELECT node_id, source_entity_id, target_entity_id
+FROM outgoing_edges
+UNION ALL
+SELECT node_id, source_entity_id, target_entity_id FROM incoming_edges
+ORDER BY node_id
+```
+
+LightRAG가 실제로 필요한 탐색 깊이가 1-hop이므로, 이 구현은 **실용적으로 충분**하다.
+
+#### 4.6.2 Multi-hop 순회 — 구현 없음
+
+`get_knowledge_graph()`는 `max_depth` 파라미터를 받지만 실제 재귀 순회를 구현하지 않는다. 코드 주석이 이를 명시한다 (`pg_ops_sync_graph_storage.py:289-291`):
+
+```
+"For now, it only supports getting nodes by label pattern and their immediate connections.
+Full graph traversal with max_depth would require additional Repository methods."
+```
+
+Apache AGE나 Neo4j였다면 Cypher 한 줄로 해결된다:
+
+```cypher
+MATCH (n)-[*1..3]-(m) WHERE n.entity_id = $start RETURN m
+```
+
+관계형 테이블에서 동등한 연산을 수행하려면 재귀 CTE(`WITH RECURSIVE`) 또는 Python에서 BFS/DFS 루프가 필요하다. 현재 ApeRAG에는 그 구현이 없다.
+
+#### 4.6.3 N+1 문제 — 단일 연산 호출 시
+
+`get_graph_node_degree()` (단일 노드 버전)는 쿼리 2번을 분리 실행한다:
+
+```python
+# graph.py:217-228 — 단일 노드, 2번 쿼리
+outgoing_count = session.execute(COUNT where source == node_id).scalar()
+incoming_count = session.execute(COUNT where target == node_id).scalar()
+```
+
+이 함수를 N개 노드에 반복 호출하면 **2N번 쿼리**가 발생한다. 단, 실제 쿼리 파이프라인은 대부분 batch 버전을 사용하므로 실제 발생 빈도는 낮다:
+
+```sql
+-- graph.py:386-410 — batch 버전: CTE로 1번 쿼리
+WITH node_list AS (SELECT unnest(:node_ids) AS entity_id),
+outgoing_counts AS (SELECT source_entity_id, COUNT(*) AS out_degree ...),
+incoming_counts AS (SELECT target_entity_id, COUNT(*) AS in_degree ...)
+SELECT nl.entity_id,
+       COALESCE(oc.out_degree, 0) + COALESCE(ic.in_degree, 0) AS total_degree
+FROM node_list nl
+LEFT JOIN outgoing_counts oc ON nl.entity_id = oc.entity_id
+LEFT JOIN incoming_counts ic ON nl.entity_id = ic.entity_id
+```
+
+#### 4.6.4 OR 폭발 — edge pairs 배치 조회
+
+`get_graph_edges_batch()`는 조회할 (src, tgt) 쌍 수만큼 OR 절을 생성한다:
+
+```python
+# graph.py:430-438
+conditions = []
+for source, target in edge_pairs:
+    conditions.append(and_(source == source, target == target))
+stmt = select(...).where(and_(workspace == ws, or_(*conditions)))
+# 결과: WHERE workspace=? AND ((src=A AND tgt=B) OR (src=C AND tgt=D) OR ...)
+```
+
+edge pair가 수백 개 이상이면 쿼리 플래너 최적화가 어려워진다. 개선 방법은 VALUES 절 또는 임시 테이블 조인이다.
+
+#### 4.6.5 Pruning — 단순 Truncation
+
+`get_knowledge_graph()`의 pruning은 단순히 앞에서 자른다:
+
+```python
+# pg_ops_sync_graph_storage.py:307-311
+matching_labels = all_labels[:MAX_GRAPH_NODES]
+```
+
+weight 내림차순이나 degree 내림차순 정렬 없이, `entity_id` 알파벳 순서대로 상위 N개를 반환한다. 의미 있는 중요도 기반 pruning은 이 레이어에 없다. 실제 token-budget pruning은 Python `query.py` 레이어에서 처리된다.
+
+#### 4.6.6 종합 평가
+
+| 연산 | SQL 구현 | 쿼리 횟수 | 평가 |
+|------|----------|-----------|------|
+| 1-hop 엣지 조회 (batch) | UNION ALL + ANY | 1번 | [OK] |
+| node degree (batch) | CTE + UNNEST | 1번 | [OK] |
+| node 데이터 (batch) | IN 조건 | 1번 | [OK] |
+| node degree (단일) | 2번 COUNT 분리 | 2번/노드 | [WARN] 반복 호출 시 N+1 |
+| edge pairs 조회 | OR 조건 반복 | 1번이나 OR 폭발 | [WARN] 대규모 시 느림 |
+| multi-hop 순회 | 미구현 | N/A | [ERR] max_depth 무시됨 |
+| pruning | 알파벳 순 truncation | N/A | [WARN] 중요도 무관 |
+
+**결론:** ApeRAG의 관계형 테이블 그래프는 LightRAG가 실제로 사용하는 1-hop 탐색 패턴에 대해서는 잘 최적화되어 있다. Multi-hop이 필요해지는 시나리오(복잡한 지식 그래프 탐색)에서는 추가 구현이 필요하다.
 
 ---
 
@@ -1313,45 +1442,41 @@ pub struct QueryStats {
 
 ### 10.1 파이프라인 단계별 비교
 
-| 단계 | LightRAG | RAG-Anything | EdgeQuake |
-|------|----------|-------------|-----------|
-| **키워드 추출** | LLM (hl + ll) | LightRAG 그대로 | LLM (hl + ll + **intent**) |
-| **모드 선택** | 수동 파라미터 | 수동 파라미터 | **자동 (intent 기반)** + 수동 오버라이드 |
-| **키워드 검증** | 없음 | 없음 | **그래프 존재 확인** |
-| **임베딩 계산** | 필요 시 순차 | LightRAG 그대로 | **3중 병렬 사전 계산** |
-| **Local 탐색** | top_k=40 → 1-hop | LightRAG 그대로 | top_k=60 (3x 오버샘플) → 1-hop |
-| **Global 탐색** | top_k=40 → 역추출 | LightRAG 그대로 | top_k=60 (3x 오버샘플) + **인기 엔티티 폴백** |
-| **Hybrid 병합** | 라운드로빈 교대 | LightRAG 그대로 | **Local 우선 + 리소스 분할** |
-| **리랭킹** | 없음 | 없음 | **BM25 (폴백 포함)** |
-| **엔티티 토큰** | 6,000 | 6,000 | **10,000** |
-| **관계 토큰** | 8,000 | 8,000 | **10,000** |
-| **전체 토큰** | 30,000 | 30,000 | 30,000 |
-| **컨텍스트 포맷** | JSON 블록 | JSON 블록 | **Markdown 블록** |
-| **참조 형식** | [N] Document Title (최대 5개) | [N] Document Title (최대 5개) | score 인라인 |
-| **불충분 정보** | "답변 불가" | "답변 불가" | **"가용 정보로 부분 답변"** |
-| **멀티모달 쿼리** | 없음 | **텍스트 변환 + VLM** | 없음 |
-| **VLM 이미지 처리** | 없음 | **base64 인라인 + VLM** | 없음 |
-| **프로바이더 오버라이드** | 없음 | 없음 | **사용자 선택 LLM 전파** |
-| **캐싱** | 키워드 + 응답 | 키워드 + 응답 + 멀티모달 | 키워드 (24h TTL) |
-| **비용 추적** | 없음 | 없음 | **embedding/retrieval/tokens 추적** |
-| **멀티테넌시** | 없음 | 없음 | **tenant/workspace 격리** |
-| **결정론적 결과** | HashMap (비결정적) | HashMap (비결정적) | **Vec (결정론적)** |
-| **그래프 노드 구성** | 엔티티만 (청크 ≠ 노드) | 엔티티만 (청크 ≠ 노드) | 엔티티만 (청크 ≠ 노드) |
-| **청크↔엔티티 연결** | `source_id` (구분자 문자열) | `source_id` (구분자 문자열) | `source_chunk_ids` (Vec) |
-| **엔티티 IDF penalty** | 없음 (degree 우대) | 없음 (degree 우대) | 없음 (degree 우대) |
-| **청크 IDF penalty** | 없음 | 없음 | **BM25 IDF 적용** |
-| **엔티티 검색 투입** | ll_keywords (키워드만) | ll_keywords (키워드만) | ll_keywords 임베딩 (키워드 비면 원본 쿼리 폴백) |
-| **청크 검색 투입** | 원본 쿼리 | 원본 쿼리 | 원본 쿼리 임베딩 (사전 계산) |
+| 단계 | LightRAG | RAG-Anything | ApeRAG | EdgeQuake |
+|------|----------|-------------|--------|-----------|
+| **키워드 추출** | LLM (hl + ll) | LightRAG 그대로 | LightRAG 그대로 (수정 버전) | LLM (hl + ll + **intent**) |
+| **모드 선택** | 수동 파라미터 | 수동 파라미터 | 수동 파라미터 | **자동 (intent 기반)** + 수동 오버라이드 |
+| **키워드 검증** | 없음 | 없음 | 없음 | **그래프 존재 확인** |
+| **임베딩 계산** | 필요 시 순차 | LightRAG 그대로 | LightRAG 그대로 | **3중 병렬 사전 계산** |
+| **Local 탐색** | top_k=40 → 1-hop | LightRAG 그대로 | LightRAG 그대로 | top_k=60 (3x 오버샘플) → 1-hop |
+| **Global 탐색** | top_k=40 → 역추출 | LightRAG 그대로 | LightRAG 그대로 | top_k=60 (3x 오버샘플) + **인기 엔티티 폴백** |
+| **Hybrid 병합** | 라운드로빈 교대 | LightRAG 그대로 | LightRAG 그대로 | **Local 우선 + 리소스 분할** |
+| **풀텍스트 검색** | 없음 | 없음 | **Elasticsearch BM25 병렬** | BM25 리랭킹 (post-retrieval) |
+| **리랭킹** | 없음 | 없음 | ES 스코어 기반 | **BM25 (폴백 포함)** |
+| **엔티티 토큰** | 6,000 | 6,000 | 6,000 (LightRAG 기본) | **10,000** |
+| **관계 토큰** | 8,000 | 8,000 | 8,000 (LightRAG 기본) | **10,000** |
+| **전체 토큰** | 30,000 | 30,000 | 30,000 | 30,000 |
+| **컨텍스트 포맷** | JSON 블록 | JSON 블록 | JSON 블록 (LightRAG 기본) | **Markdown 블록** |
+| **불충분 정보** | "답변 불가" | "답변 불가" | "답변 불가" | **"가용 정보로 부분 답변"** |
+| **멀티모달 쿼리** | 없음 | **텍스트 변환 + VLM** | Vision 인덱스 병렬 검색 | 없음 |
+| **VLM 이미지 처리** | 없음 | **base64 인라인 + VLM** | Vision 인덱스 저장 후 검색 | 없음 |
+| **프로바이더 오버라이드** | 없음 | 없음 | 없음 | **사용자 선택 LLM 전파** |
+| **캐싱** | 키워드 + 응답 | 키워드 + 응답 + 멀티모달 | **Redis** (키워드 + 응답) | 키워드 (24h TTL) |
+| **비용 추적** | 없음 | 없음 | 없음 | **embedding/retrieval/tokens 추적** |
+| **멀티테넌시** | 없음 | 없음 | **Collection 격리** | **tenant/workspace 격리** |
+| **결정론적 결과** | HashMap (비결정적) | HashMap (비결정적) | HashMap (비결정적) | **Vec (결정론적)** |
+| **청크 IDF penalty** | 없음 | 없음 | **ES IDF 적용** | **BM25 IDF 적용** |
 
 ### 10.2 핵심 설계 철학 차이
 
-| 관점 | LightRAG | RAG-Anything | EdgeQuake |
-|------|----------|-------------|-----------|
-| **접근법** | 기본 Graph RAG 알고리즘 | LightRAG + 멀티모달 전처리 | LightRAG 알고리즘 + **프로덕션 최적화** |
-| **그래프 탐색 수정** | 원본 | **무수정** (완전 위임) | **배치 최적화 + 폴백 전략** |
-| **지능 계층** | LLM 키워드 추출 | LLM/VLM 컨텐츠 변환 | **LLM intent 분류 + 자동 라우팅** |
-| **에러 처리** | 빈 결과 → 실패 응답 | LightRAG 위임 | **폴백 체인** (인기 엔티티, BM25 폴백, 부분 답변) |
-| **토큰 효율** | 청크 중심 (53%) | LightRAG 그대로 | **그래프 중심 (66%)** — 요약된 그래프 데이터가 더 밀도 높음 |
+| 관점 | LightRAG | RAG-Anything | ApeRAG | EdgeQuake |
+|------|----------|-------------|--------|-----------|
+| **접근법** | 기본 Graph RAG 알고리즘 | LightRAG + 멀티모달 전처리 | LightRAG 수정 + **분산 인프라** | LightRAG 알고리즘 + **프로덕션 최적화** |
+| **그래프 탐색 수정** | 원본 | **무수정** (완전 위임) | 수정된 LightRAG 위임 | **배치 최적화 + 폴백 전략** |
+| **지능 계층** | LLM 키워드 추출 | LLM/VLM 컨텐츠 변환 | LightRAG 기반 + **5종 병렬 인덱스** | **LLM intent 분류 + 자동 라우팅** |
+| **에러 처리** | 빈 결과 → 실패 응답 | LightRAG 위임 | LightRAG 위임 | **폴백 체인** (인기 엔티티, BM25 폴백, 부분 답변) |
+| **토큰 효율** | 청크 중심 (53%) | LightRAG 그대로 | LightRAG 그대로 | **그래프 중심 (66%)** — 요약된 그래프 데이터가 더 밀도 높음 |
+| **확장성** | 단일 프로세스 | 단일 프로세스 | **Celery + K8s 수평 확장** | Rust 멀티코어 활용 |
 
 ### 10.3 파일 위치 참조
 
@@ -1360,6 +1485,17 @@ pub struct QueryStats {
 - 쿼리 연산: `lightrag/operate.py:3015-5003`
 - 프롬프트: `lightrag/prompt.py:224-432`
 - 상수: `lightrag/constants.py:45-100`
+
+**ApeRAG:**
+- 인덱스 타입 정의: `aperag/index/base.py`
+- 그래프 인덱서 (LightRAG 래퍼): `aperag/index/graph_index.py`
+- 벡터 인덱서 (Qdrant): `aperag/index/vector_index.py`
+- 풀텍스트 인덱서 (Elasticsearch): `aperag/index/fulltext_index.py`
+- 요약 인덱서: `aperag/index/summary_index.py`
+- Vision 인덱서: `aperag/index/vision_index.py`
+- 인덱스 관리자: `aperag/index/manager.py`
+- 쿼리 모델: `aperag/query/query.py`
+- 태스크 오케스트레이터: `aperag/tasks/document.py`
 
 **RAG-Anything:**
 - 쿼리 메서드: `raganything/query.py:1-819`

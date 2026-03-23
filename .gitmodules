@@ -1,0 +1,3 @@
+[submodule "aperag"]
+	path = aperag
+	url = https://github.com/apecloud/ApeRAG

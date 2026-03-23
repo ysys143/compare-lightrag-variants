@@ -1,7 +1,7 @@
 # BM25 하이브리드 서치 도입 설계서
 
 **작성일:** 2026-03-07 (초판 03-06, Bayesian BM25 옵션 추가 03-07)
-**범위:** LightRAG, RAG-Anything, EdgeQuake 세 프레임워크의 BM25 기반 하이브리드 검색 도입 전략
+**범위:** LightRAG, RAG-Anything, EdgeQuake, ApeRAG 네 프레임워크의 BM25/풀텍스트 기반 하이브리드 검색 현황 및 도입 전략
 
 ---
 
@@ -9,15 +9,15 @@
 
 ### 1.1 검색 레벨별 BM25 활용 현황
 
-| 검색 레벨 | LightRAG | RAG-Anything | EdgeQuake |
-|-----------|----------|-------------|-----------|
-| **엔티티 검색** | 벡터 only | 벡터 only (LightRAG 위임) | 벡터 only |
-| **관계 검색** | 벡터 only | 벡터 only (LightRAG 위임) | 벡터 only |
-| **청크 검색 (NAIVE/MIX)** | 벡터 only | 벡터 only (LightRAG 위임) | 벡터 only |
-| **청크 리랭킹 (post-retrieval)** | 없음 | 없음 | **BM25 리랭킹** |
-| **엔티티 정렬** | degree x weight | degree x weight | **degree DESC** |
+| 검색 레벨 | LightRAG | RAG-Anything | ApeRAG | EdgeQuake |
+|-----------|----------|-------------|--------|-----------|
+| **엔티티 검색** | 벡터 only | 벡터 only (LightRAG 위임) | pgvector(PG) + 풀텍스트(ES) 병렬 | 벡터 only |
+| **관계 검색** | 벡터 only | 벡터 only (LightRAG 위임) | pgvector(PG) + 풀텍스트(ES) 병렬 | 벡터 only |
+| **청크 검색 (NAIVE/MIX)** | 벡터 only | 벡터 only (LightRAG 위임) | Qdrant + 풀텍스트(ES) 병렬 | 벡터 only |
+| **청크 리랭킹 (post-retrieval)** | 없음 | 없음 | ES 자체 스코어링 (BM25 기반) | **BM25 리랭킹** |
+| **엔티티 정렬** | degree x weight | degree x weight | 스코어 기반 | **degree DESC** |
 
-**핵심 발견:** EdgeQuake조차 BM25를 **리랭킹**(post-retrieval)에만 사용하고, **검색 자체**(retrieval)에는 벡터만 사용한다. 진정한 하이브리드 서치(BM25 검색 + 벡터 검색 결과 병합)는 세 프레임워크 모두 부재하다.
+**핵심 발견:** ApeRAG는 Elasticsearch를 전용 풀텍스트 스토리지로 사용하므로 **하이브리드 검색이 아키텍처 레벨에서 이미 내장**되어 있다 (Qdrant 벡터 + ES 풀텍스트 병렬 실행). 나머지 세 프레임워크는 BM25를 추가로 도입해야 한다. EdgeQuake조차 BM25를 **리랭킹**(post-retrieval)에만 사용하고, **검색 자체**(retrieval)에는 벡터만 사용한다.
 
 ### 1.2 EdgeQuake의 현재 BM25 리랭킹 구조
 
@@ -541,10 +541,13 @@ NanoVectorDB 백엔드 사용 시 인메모리 BM25의 스케일 한계.
 
 | 프레임워크 | 역인덱스 저장소 | 새 인프라 필요? | 구현 난이도 |
 |-----------|---------------|---------------|-----------|
+| **ApeRAG** | **Elasticsearch** (전용 풀텍스트 DB, 이미 필수 인프라) | **없음** (기존 ES 활용) | **없음** (이미 구현됨) |
 | **EdgeQuake** | PostgreSQL tsvector + GIN (GENERATED STORED 컬럼) | **없음** (기존 PG 활용) | 낮음 |
 | **LightRAG (NanoVDB)** | Python 인메모리 (`rank-bm25` / `bm25s`) | pip 패키지 1개 | 낮음 |
 | **LightRAG (PG)** | PostgreSQL tsvector + GIN | 없음 | 낮음 |
 | **RAG-Anything** | LightRAG 상속 | 없음 | 없음 |
+
+**ApeRAG 특이사항:** ES는 BM25를 기본 스코어링 알고리즘으로 사용하므로, ApeRAG의 풀텍스트 검색은 사실상 BM25 검색이다. 별도 구현 없이 ES 인덱싱만으로 하이브리드 검색의 풀텍스트 쪽이 완성된다.
 
 ---
 
@@ -915,6 +918,68 @@ let entities = if self.config.enable_hybrid_search && self.text_search.is_some()
 
 ---
 
+### 5.4 ApeRAG
+
+ApeRAG는 Elasticsearch를 필수 인프라로 사용하므로, **풀텍스트 검색이 이미 구현된 상태**다. 하이브리드 검색을 완성하려면 Qdrant 벡터 결과와 ES 풀텍스트 결과를 **병합하는 로직**만 추가하면 된다.
+
+#### 5.4.1 현재 상태
+
+ApeRAG는 5종 인덱스를 각각 독립적으로 쿼리한다:
+
+```python
+# aperag/index/vector_index.py — Qdrant 벡터 검색
+results = qdrant_client.search(collection_name, query_embedding, limit=top_k)
+
+# aperag/index/fulltext_index.py — Elasticsearch 풀텍스트 검색
+results = es_client.search(index=index_name, body={"query": {"match": {"content": query}}})
+```
+
+**현재 문제:** 두 결과가 병합되지 않고 독립적으로 반환된다.
+
+#### 5.4.2 개선 방향 — 결과 병합 추가
+
+```python
+# aperag/index/hybrid_search.py (신규)
+async def hybrid_search(query: str, top_k: int = 10):
+    # 병렬 실행
+    vector_results, fulltext_results = await asyncio.gather(
+        vector_index.search(query, top_k=top_k * 2),
+        fulltext_index.search(query, top_k=top_k * 2),
+    )
+    # RRF 또는 Bayesian 병합
+    merged = reciprocal_rank_fusion(vector_results, fulltext_results, k=60)
+    return merged[:top_k]
+```
+
+**병합 방식 선택:**
+
+| 옵션 | 장점 | 적합 상황 |
+|------|------|---------|
+| **RRF** | 구현 단순, 파라미터 없음 | 빠른 도입 |
+| **Bayesian** | ES 스코어와 Qdrant 거리를 확률로 통일 | 점수 이질성 해소 |
+
+**ES 스코어 특이사항:** ES는 BM25 relevance score를 반환하며 범위가 0~∞ (문서마다 다름). Qdrant는 코사인 유사도 -1~1. Bayesian 병합 시 각각 sigmoid/min-max 정규화 필요.
+
+#### 5.4.3 인덱스 구성 — 이미 완비
+
+```python
+# aperag/index/fulltext_index.py (기존)
+# ES 인덱스에 content 필드가 text 타입으로 매핑되어 있으면
+# BM25 스코어링은 ES 엔진이 자동 처리
+mapping = {
+    "mappings": {
+        "properties": {
+            "content": {"type": "text", "analyzer": "standard"},
+            "doc_id":  {"type": "keyword"},
+        }
+    }
+}
+```
+
+**추가 작업 없음** — 인덱스 구성은 이미 완비. 병합 레이어만 추가하면 된다.
+
+---
+
 ## 6. 변경 영향 범위 요약
 
 ### 6.1 LightRAG
@@ -926,13 +991,23 @@ let entities = if self.config.enable_hybrid_search && self.text_search.is_some()
 | `lightrag.py` | BM25 인덱스 초기화 로직 추가 |
 | (인제스천) | 청크/엔티티 저장 시 BM25 인덱스 동시 빌드 |
 
-### 6.2 RAG-Anything
+### 6.2 ApeRAG
+
+| 파일 | 변경 내용 |
+|------|----------|
+| `aperag/index/hybrid_search.py` | **[NEW]** `hybrid_search()` — Qdrant + ES 결과 병합 |
+| `aperag/index/vector_index.py` | 병합 레이어 호출 추가 |
+| `aperag/index/fulltext_index.py` | **변경 없음** (ES 인덱싱 이미 완비) |
+
+**실제 변경량:** 신규 파일 1개 + 기존 파일 2개 소규모 수정. 인프라 변경 없음.
+
+### 6.3 RAG-Anything
 
 | 파일 | 변경 내용 |
 |------|----------|
 | 없음 | LightRAG 수정 시 자동 상속 |
 
-### 6.3 EdgeQuake
+### 6.4 EdgeQuake
 
 | 파일 | 변경 내용 |
 |------|----------|
@@ -952,15 +1027,18 @@ let entities = if self.config.enable_hybrid_search && self.text_search.is_some()
 
 | 순서 | 작업 | 프레임워크 | 효과 | 난이도 | 비고 |
 |------|------|-----------|------|--------|------|
-| **1** | 청크 하이브리드 검색 | LightRAG | 높음 | 중간 | RAG-Anything 자동 상속 |
-| **2** | 엔티티 하이브리드 검색 | LightRAG | 높음 | 중간 | RAG-Anything 자동 상속 |
-| **3** | 청크 하이브리드 검색 | EdgeQuake | 높음 | 낮음 | BM25 인프라 이미 존재 |
-| **4** | 엔티티 하이브리드 검색 | EdgeQuake | 중간 | 낮음 | PostgreSQL tsvector 활용 |
-| **5** | 관계 하이브리드 검색 | 전체 | 낮음 | 중간 | 선택적 |
+| **1** | 벡터+풀텍스트 결과 병합 레이어 추가 | ApeRAG | 높음 | **매우 낮음** | ES+Qdrant 인프라 이미 완비, 병합 로직만 추가 |
+| **2** | 청크 하이브리드 검색 | LightRAG | 높음 | 중간 | RAG-Anything 자동 상속 |
+| **3** | 엔티티 하이브리드 검색 | LightRAG | 높음 | 중간 | RAG-Anything 자동 상속 |
+| **4** | 청크 하이브리드 검색 | EdgeQuake | 높음 | 낮음 | BM25 인프라 이미 존재 |
+| **5** | 엔티티 하이브리드 검색 | EdgeQuake | 중간 | 낮음 | PostgreSQL tsvector 활용 |
+| **6** | 관계 하이브리드 검색 | 전체 | 낮음 | 중간 | 선택적 |
 
-**1번부터 시작하면** RAG-Anything도 자동으로 혜택을 받으므로, 실질적으로 두 프레임워크를 동시에 개선하는 효과.
+**1번(ApeRAG)이 가장 쉬운 이유:** Elasticsearch는 BM25를 기본 스코어링으로 사용하므로 인덱싱만 하면 풀텍스트 검색이 자동으로 BM25 점수를 반환한다. Qdrant 벡터 검색 결과와 병합하는 로직(파일 1개)만 추가하면 완성.
 
-**3번이 난이도가 낮은 이유:**
+**2번부터 시작하면** RAG-Anything도 자동으로 혜택을 받으므로, 실질적으로 두 프레임워크를 동시에 개선하는 효과.
+
+**4번이 난이도가 낮은 이유:**
 - EdgeQuake는 이미 `BM25Reranker`를 사용 중 (edgequake-llm 크레이트)
 - PostgreSQL tsvector + GIN 인덱스는 DB 마이그레이션만으로 준비 완료
 - `bm25_search.rs` 신규 생성으로 기존 코드 수정 최소화

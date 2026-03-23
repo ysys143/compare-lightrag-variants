@@ -1,0 +1,24 @@
+hooks:
+  attention: true
+  log: true
+  read: true
+  lint_markdown: true
+  lint_shell: true
+  deletion_safety: true
+  workflow_gate: true
+  websearch_redirect: true
+  compact_recovery: true
+
+tools:
+  codex: available
+  gemini: available
+  jq: available
+  gh: available
+  node: available
+  python3: available
+  shellcheck: available
+  lychee: available
+  markdownlint-cli2: available
+
+stage_checkpoints:
+  - setup

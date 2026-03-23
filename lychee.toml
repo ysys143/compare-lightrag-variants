@@ -1,0 +1,7 @@
+# Lychee link checker configuration
+# Exclude vendored/submodule source directories from link checking
+exclude_path = [
+  "edgequake",
+  "RAG-Anything",
+  "aperag",
+]

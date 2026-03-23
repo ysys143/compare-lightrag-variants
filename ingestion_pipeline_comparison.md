@@ -1,6 +1,6 @@
-# 3개 프레임워크 Ingestion 파이프라인 상세 비교
+# Ingestion 파이프라인 상세 비교: LightRAG vs RAG-Anything vs ApeRAG vs EdgeQuake
 
-> LightRAG vs RAG-Anything vs EdgeQuake — 소스코드 레벨 분석
+> 소스코드 레벨 분석
 
 ---
 
@@ -636,27 +636,266 @@ EdgeQuake의 `SentenceBoundaryChunking`은 **시맨틱 청킹이 아니다:**
 
 ---
 
-## 핵심 차이 요약표
+---
 
-| 단계 | LightRAG | RAG-Anything | EdgeQuake |
-|-----|---------|-------------|----------|
-| **문서 파싱** | 없음 (텍스트 직접 입력) | MinerU/Docling/PaddleOCR | edgequake-pdf2md (Vision LLM) |
-| **청킹** | 1200t 고정, 오버랩 100t | LightRAG 위임 (동일) | 적응형 (1200/800/600t, 문서 크기 기반) |
-| **엔티티 추출 프롬프트** | 튜플 기반 (11 타입) | LightRAG 동일 | 동일 프롬프트 포팅 (**9 타입**, 실용적) |
-| **글리닝** | 1회 (기본) | LightRAG 동일 | 1회 (기본), 별도 모듈 |
-| **엔티티 정규화** | 없음 (LLM 의존) | 없음 (LLM 의존) | **코드 레벨** UPPERCASE_UNDERSCORE |
-| **멀티모달 노드** | 없음 | 별도 엔티티 노드 + belongs_to 관계 | 없음 (Markdown 변환) |
-| **VLM 호출** | 없음 | 4종 프로세서별 (이미지/테이블/수식/일반) | PDF→이미지→Vision LLM만 |
-| **머지** | LLM 요약 (8개 초과 시) | LightRAG 동일 | LLM 요약 (기본) + simple merge fallback |
-| **커뮤니티** | 없음 (쿼리 시) | 없음 (쿼리 시) | Louvain (ingestion 시) |
-| **프루닝** | source_ids_limit (FIFO/KEEP, 300) | LightRAG 동일 | max_sources=10, max_description_length=4096 |
-| **비용 추적** | 없음 | 없음 | 토큰/비용/시간 상세 추적 |
-| **재시도** | 캐시 기반 | LightRAG 동일 | 3회 재시도 + 지수 백오프 |
-| **체크포인트** | 없음 | 파싱 캐시 (해시 기반) | FileCheckpointStore (PDF 변환 재개) |
+## 5. ApeRAG (LightRAG 수정 + 5종 병렬 인덱스)
+
+### 4-1. 진입점 & 문서 파싱
+
+**파일**: `aperag/tasks/document.py` — `DocumentIndexTask.parse_document()`
+
+```
+문서 업로드 → parse_document() → ParsedDocumentData
+    → create_index() 호출 (인덱스 타입별)
+```
+
+**문서 파싱** (`aperag/index/document_parser.py`):
+- PDF, 오피스 문서, 이미지 → MinerU 기반 파싱 (`docparser` 모듈)
+- 출력: `content` (텍스트), `doc_parts` (파싱된 파트 목록)
+
+### 4-2. 5종 인덱스 병렬 생성
+
+**파일**: `aperag/tasks/document.py` — `create_index()`
+
+ApeRAG의 핵심 설계: 문서 1개당 **5가지 독립 인덱서**가 각각 실행된다.
+
+```
+문서 파싱 완료
+    ├── VectorIndexer     → Qdrant (임베딩 벡터 저장)
+    ├── FulltextIndexer   → Elasticsearch (BM25 풀텍스트 인덱스)
+    ├── GraphIndexer      → LightRAG 수정 버전 (엔티티 추출 + 그래프)
+    ├── SummaryIndexer    → LLM 요약 생성 (Global 쿼리용)
+    └── VisionIndexer     → 이미지/시각 콘텐츠 분석
+```
+
+**인덱스 상태 관리** (`aperag/index/manager.py` — `DocumentIndexManager`):
+- 각 인덱스의 상태: `PENDING → RUNNING → COMPLETE / FAILED / SKIPPED`
+- 버전 관리: 문서 업데이트 시 버전 증가, 이전 인덱스 무효화
+- Celery 재조정 시스템(`tasks/reconciler.py`)이 PENDING 상태 인덱스를 비동기 실행
+
+```python
+# aperag/index/manager.py
+all_index_types = [
+    DocumentIndexType.VECTOR,
+    DocumentIndexType.FULLTEXT,
+    DocumentIndexType.GRAPH,
+    DocumentIndexType.SUMMARY,
+    DocumentIndexType.VISION,
+]
+```
+
+### 4-3. Vector 인덱스 (Qdrant)
+
+**파일**: `aperag/index/vector_index.py` — `VectorIndexer`
+
+- `is_enabled()`: 항상 True (필수 인덱스)
+- 텍스트 청킹 → 임베딩 생성 → Qdrant 컬렉션에 저장
+- `create_embeddings_and_store()` 유틸리티 함수 사용
+- 토크나이저: `aperag/utils/tokenizer.py` (`get_default_tokenizer()`)
+
+### 4-4. Fulltext 인덱스 (Elasticsearch)
+
+**파일**: `aperag/index/fulltext_index.py` — `FulltextIndexer`
+
+- Elasticsearch에 텍스트 청크 인덱싱
+- ES 기본 analyzer (`standard`) → BM25 스코어링 자동 적용
+- 별도 BM25 구현 없음 — ES 엔진이 처리
+- `is_enabled()`: 항상 True (필수 인덱스)
+
+### 4-5. Graph 인덱스 (수정된 LightRAG)
+
+**파일**: `aperag/index/graph_index.py` — `GraphIndexer`
+
+- `is_enabled()`: `config.enable_knowledge_graph` 설정으로 제어 (선택적)
+- 그래프 인덱싱은 Celery 재조정 시스템을 통해 **비동기** 실행
+- 수정된 LightRAG 내부에서 엔티티 추출 → 머징 → 그래프 구축
+- **엔티티 머징**: 동일 의미 엔티티 통합 (중복 제거) — ApeRAG의 LightRAG 수정 핵심
+- 그래프 저장소: **PostgreSQL 관계형 테이블** (`PGOpsSyncGraphStorage`, SQLAlchemy ORM — Apache AGE 없음)
+- 엔티티 임베딩: **PostgreSQL pgvector** (`PGOpsSyncVectorStorage`)
+- 환경 변수로 Neo4j로 전환 가능 (`GRAPH_INDEX_GRAPH_STORAGE=Neo4jSyncImpl`)
+
+```python
+# graph_index.py:35
+class GraphIndexer(AsyncIndexer):
+    """Graph index implementation using LightRAG"""
+
+    def is_enabled(self, collection) -> bool:
+        config = parseCollectionConfig(collection.config)
+        return config.enable_knowledge_graph or False
+```
+
+### 4-6. Summary 인덱스
+
+**파일**: `aperag/index/summary_index.py` — `SummaryIndexer`
+
+- 문서 전체에 대한 LLM 요약 생성
+- Global 쿼리 모드에서 커뮤니티 요약 대신 활용 가능
+- `is_enabled()`: collection 설정에 따라 선택적
+
+### 4-7. Vision 인덱스
+
+**파일**: `aperag/index/vision_index.py` — `VisionIndexer`
+
+- 이미지/시각 콘텐츠를 Vision LLM으로 분석
+- 설명 텍스트 생성 → 별도 저장
+- `is_enabled()`: collection 설정에 따라 선택적
+
+### 4-8. 전체 데이터 흐름 요약
+
+```
+문서 업로드 (API)
+    │ DocumentIndexTask.parse_document()
+    ▼
+ParsedDocumentData {content, doc_parts, file_path}
+    │ DocumentIndexManager.create_or_update_document_indexes()
+    │   → 5종 인덱스 레코드를 PENDING으로 생성
+    ▼
+Celery Reconciler (tasks/reconciler.py)
+    ├── PENDING → RUNNING → VectorIndexer.create_index()    → Qdrant
+    ├── PENDING → RUNNING → FulltextIndexer.create_index()  → Elasticsearch
+    ├── PENDING → RUNNING → GraphIndexer.create_index_async() → LightRAG (수정)
+    │                           └── 엔티티 추출 → 머징 → PostgreSQL 관계형 테이블 (PGOpsSyncGraphStorage)
+    ├── PENDING → RUNNING → SummaryIndexer.create_index()   → PostgreSQL
+    └── PENDING → RUNNING → VisionIndexer.create_index()    → 이미지 분석 저장
+```
+
+**LightRAG vs ApeRAG 인제스션 핵심 차이:**
+- LightRAG: 단일 파이프라인 (청킹 → 엔티티 추출 → 그래프)
+- ApeRAG: 5종 병렬 인덱스 파이프라인 + Celery 비동기 실행 + 인덱스 상태 관리
+
+### 4-9. 그래프 저장소 성능 분석 — 관계형 테이블과 N+1 문제
+
+**파일**: `aperag/aperag/db/repositories/graph.py` — `GraphRepositoryMixin`
+
+ApeRAG의 그래프 저장소(`PGOpsSyncGraphStorage`)는 PostgreSQL 관계형 테이블 2개로 구성된다:
+
+```sql
+-- lightrag_graph_nodes: (workspace, entity_id) UNIQUE
+-- lightrag_graph_edges: (workspace, source_entity_id, target_entity_id) UNIQUE
+```
+
+#### Upsert — 잘 동작함
+
+`ON CONFLICT DO UPDATE` 패턴으로 중복 삽입을 원자적으로 처리한다:
+
+```python
+# graph.py:42-63
+stmt = insert(LightRAGGraphNode).values(...)
+stmt = stmt.on_conflict_do_update(
+    index_elements=["workspace", "entity_id"],
+    set_=dict(entity_name=..., description=..., updatetime=func.now()),
+)
+```
+
+엔티티 머징(semantic dedup)은 이 레이어 위의 LightRAG 수정 모듈에서 처리된다.
+
+#### 1-hop 탐색 — 효율적
+
+`get_nodes_edges_batch()`가 UNION ALL + ANY로 N개 노드의 엣지를 **1번 쿼리**에 처리한다:
+
+```sql
+-- graph.py:482-504
+WITH node_list AS (SELECT unnest(:node_ids) AS entity_id),
+outgoing_edges AS (
+    SELECT e.source_entity_id AS node_id, e.source_entity_id, e.target_entity_id
+    FROM lightrag_graph_edges e
+    WHERE e.workspace = :workspace AND e.source_entity_id = ANY(:node_ids)
+),
+incoming_edges AS (
+    SELECT e.target_entity_id AS node_id, e.source_entity_id, e.target_entity_id
+    FROM lightrag_graph_edges e
+    WHERE e.workspace = :workspace AND e.target_entity_id = ANY(:node_ids)
+)
+SELECT node_id, source_entity_id, target_entity_id
+FROM outgoing_edges UNION ALL SELECT ... FROM incoming_edges
+```
+
+#### Multi-hop 탐색 — 구현 없음
+
+`get_knowledge_graph()` 내부 주석이 한계를 명시한다:
+
+```python
+# pg_ops_sync_graph_storage.py:289-291
+"""
+Note: This is a simplified implementation that uses the existing Repository pattern.
+For now, it only supports getting nodes by label pattern and their immediate connections.
+Full graph traversal with max_depth would require additional Repository methods.
+"""
+```
+
+`max_depth=3`으로 호출해도 실제로는 **1-hop만 실행**된다. 그래프 크기가 커질 때 2~3홉 순회가 필요하다면 Python에서 반복 쿼리를 직접 구현해야 한다.
+
+#### N+1 문제가 발생하는 시나리오
+
+단일 노드의 degree를 구하는 `get_graph_node_degree()`는 쿼리를 2번 분리 실행한다:
+
+```python
+# graph.py:217-228
+outgoing_count = session.execute(
+    select(func.count(...)).where(source_entity_id == node_id)
+).scalar()
+incoming_count = session.execute(
+    select(func.count(...)).where(target_entity_id == node_id)
+).scalar()
+return outgoing_count + incoming_count
+```
+
+N개 노드를 순서대로 처리할 경우 2N번 쿼리가 발생한다. 단, batch 버전(`get_graph_node_degrees_batch()`)은 CTE로 **1번 쿼리**에 해결하므로, 실제 쿼리 파이프라인이 batch API를 사용하는 한 문제가 없다.
+
+#### edge pairs 배치 — OR 폭발 가능성
+
+`get_graph_edges_batch()`는 edge pair 수만큼 OR 절을 생성한다:
+
+```python
+# graph.py:430-438
+conditions = []
+for source, target in edge_pairs:
+    conditions.append(and_(source_entity_id == source, target_entity_id == target))
+stmt = select(...).where(and_(workspace == workspace, or_(*conditions)))
+```
+
+edge pair가 수백 개 이상이면 OR 절이 길어져 PostgreSQL 쿼리 플래너 부하가 증가한다. 대규모 그래프에서는 임시 테이블 또는 VALUES 절 방식이 더 효율적이다.
+
+#### 요약
+
+| 연산 | 구현 | 평가 |
+|------|------|------|
+| node upsert | ON CONFLICT DO UPDATE | [OK] 원자적, 효율적 |
+| edge upsert | ON CONFLICT DO UPDATE | [OK] 원자적, 효율적 |
+| 1-hop 엣지 조회 (batch) | UNION ALL + ANY | [OK] 효율적 |
+| node degree (batch) | CTE + UNNEST | [OK] 효율적 |
+| node degree (단일) | 2번 COUNT 쿼리 분리 | [WARN] N개 반복 시 N+1 |
+| edge pairs 조회 | OR 조건 반복 | [WARN] 대규모 시 OR 폭발 |
+| multi-hop 순회 | **미구현** (1-hop 고정) | [ERR] max_depth 무시됨 |
+| pruning | max_nodes 단순 truncation | [WARN] weight/degree 정렬 없음 |
 
 ---
 
-## 5. 추가 과제 노트
+## 핵심 차이 요약표
+
+| 단계 | LightRAG | RAG-Anything | ApeRAG | EdgeQuake |
+|-----|---------|-------------|--------|----------|
+| **문서 파싱** | 없음 (텍스트 직접 입력) | MinerU/Docling/PaddleOCR | MinerU 기반 (docparser 모듈) | edgequake-pdf2md (Vision LLM) |
+| **청킹** | 1200t 고정, 오버랩 100t | LightRAG 위임 (동일) | LightRAG 위임 (수정 버전) | 적응형 (1200/800/600t, 문서 크기 기반) |
+| **인덱스 종류** | 단일 (그래프+벡터) | 단일 (그래프+벡터) | **5종 병렬** (Vector/Fulltext/Graph/Summary/Vision) | 단일 (그래프+벡터) |
+| **풀텍스트 인덱스** | 없음 | 없음 | **Elasticsearch** (필수) | PostgreSQL tsvector (선택) |
+| **엔티티 추출** | 튜플 기반 (11 타입) | LightRAG 동일 | LightRAG 수정 버전 (동적 타입) | 동일 프롬프트 포팅 (**9 타입**, 실용적) |
+| **글리닝** | 1회 (기본) | LightRAG 동일 | 1회 (LightRAG 기본) | 1회 (기본), 별도 모듈 |
+| **엔티티 정규화** | 없음 (LLM 의존) | 없음 (LLM 의존) | **엔티티 머징** (동일 의미 통합) | **코드 레벨** UPPERCASE_UNDERSCORE |
+| **멀티모달 노드** | 없음 | 별도 엔티티 노드 + belongs_to 관계 | Vision 인덱스에 별도 저장 | 없음 (Markdown 변환) |
+| **VLM 호출** | 없음 | 4종 프로세서별 (이미지/테이블/수식/일반) | Vision 인덱스 생성 시 | PDF→이미지→Vision LLM만 |
+| **머지** | LLM 요약 (8개 초과 시) | LightRAG 동일 | LightRAG 수정 버전 (머징 강화) | LLM 요약 (기본) + simple merge fallback |
+| **커뮤니티** | 없음 (쿼리 시) | 없음 (쿼리 시) | 없음 (쿼리 시, LightRAG 위임) | Louvain (ingestion 시) |
+| **태스크 실행** | asyncio | asyncio | **Celery 분산 큐 + reconciler** | 자체 태스크 시스템 |
+| **인덱스 상태 관리** | 없음 | 없음 | **PENDING/RUNNING/COMPLETE/FAILED** 상태 추적 | 없음 |
+| **프루닝** | source_ids_limit (FIFO/KEEP, 300) | LightRAG 동일 | LightRAG 기본값 | max_sources=10, max_description_length=4096 |
+| **비용 추적** | 없음 | 없음 | 없음 | 토큰/비용/시간 상세 추적 |
+| **재시도** | 캐시 기반 | LightRAG 동일 | Celery 재시도 | 3회 재시도 + 지수 백오프 |
+| **체크포인트** | 없음 | 파싱 캐시 (해시 기반) | 없음 (Celery 태스크 재실행) | FileCheckpointStore (PDF 변환 재개) |
+
+---
+
+## 6. 추가 과제 노트
 
 ### 5-1. RAG-Anything 인제스션 성능 병목: LLM 호출 폭발
 

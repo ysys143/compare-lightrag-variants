@@ -1,0 +1,204 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1774199355302,
+  "projectRoot": "/Users/jaesolshin/Documents/GitHub/compare_lightrag_variants",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "RAG-Anything": {
+      "path": "RAG-Anything",
+      "purpose": null,
+      "fileCount": 10,
+      "lastAccessed": 1774199355155,
+      "keyFiles": [
+        "LICENSE",
+        "MANIFEST.in",
+        "README.md",
+        "README_zh.md",
+        "env.example"
+      ]
+    },
+    "edgequake": {
+      "path": "edgequake",
+      "purpose": null,
+      "fileCount": 19,
+      "lastAccessed": 1774199355156,
+      "keyFiles": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "CODE_OF_CONDUCT.md",
+        "CONTRIBUTING.md",
+        "DOCKER_DEPLOYMENT_SUMMARY.md"
+      ]
+    },
+    "RAG-Anything/assets": {
+      "path": "RAG-Anything/assets",
+      "purpose": "Static assets",
+      "fileCount": 3,
+      "lastAccessed": 1774199355156,
+      "keyFiles": [
+        "LiteWrite.png",
+        "logo.png",
+        "rag_anything_framework.png"
+      ]
+    },
+    "RAG-Anything/docs": {
+      "path": "RAG-Anything/docs",
+      "purpose": "Documentation",
+      "fileCount": 5,
+      "lastAccessed": 1774199355156,
+      "keyFiles": [
+        "batch_processing.md",
+        "context_aware_processing.md",
+        "enhanced_markdown.md"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "README.md",
+      "accessCount": 32,
+      "lastAccessed": 1774248968692,
+      "type": "file"
+    },
+    {
+      "path": "ingestion_pipeline_comparison.md",
+      "accessCount": 20,
+      "lastAccessed": 1774254182095,
+      "type": "file"
+    },
+    {
+      "path": "query_pipeline_comparison.md",
+      "accessCount": 17,
+      "lastAccessed": 1774204080660,
+      "type": "file"
+    },
+    {
+      "path": "hybrid_search_design.md",
+      "accessCount": 17,
+      "lastAccessed": 1774204213141,
+      "type": "file"
+    },
+    {
+      "path": ".markdownlint.json",
+      "accessCount": 5,
+      "lastAccessed": 1774255228066,
+      "type": "file"
+    },
+    {
+      "path": "aperag/aperag/index/graph_index.py",
+      "accessCount": 2,
+      "lastAccessed": 1774200479189,
+      "type": "file"
+    },
+    {
+      "path": "aperag/aperag/graph/lightrag/kg/pg_ops_sync_graph_storage.py",
+      "accessCount": 2,
+      "lastAccessed": 1774203739270,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 2,
+      "lastAccessed": 1774248820619,
+      "type": "directory"
+    },
+    {
+      "path": "aperag/aperag/config.py",
+      "accessCount": 1,
+      "lastAccessed": 1774200435655,
+      "type": "file"
+    },
+    {
+      "path": "aperag/aperag/query/query.py",
+      "accessCount": 1,
+      "lastAccessed": 1774200440199,
+      "type": "file"
+    },
+    {
+      "path": "aperag/aperag/index/manager.py",
+      "accessCount": 1,
+      "lastAccessed": 1774200441109,
+      "type": "file"
+    },
+    {
+      "path": "aperag/aperag/index/base.py",
+      "accessCount": 1,
+      "lastAccessed": 1774200448672,
+      "type": "file"
+    },
+    {
+      "path": "aperag/aperag/index/vector_index.py",
+      "accessCount": 1,
+      "lastAccessed": 1774200449314,
+      "type": "file"
+    },
+    {
+      "path": "aperag/aperag/tasks/document.py",
+      "accessCount": 1,
+      "lastAccessed": 1774200479582,
+      "type": "file"
+    },
+    {
+      "path": "aperag/aperag/graph/lightrag/kg/__init__.py",
+      "accessCount": 1,
+      "lastAccessed": 1774203320141,
+      "type": "file"
+    },
+    {
+      "path": "aperag",
+      "accessCount": 1,
+      "lastAccessed": 1774203745613,
+      "type": "directory"
+    },
+    {
+      "path": "aperag/aperag/db/repositories/graph.py",
+      "accessCount": 1,
+      "lastAccessed": 1774203749225,
+      "type": "file"
+    },
+    {
+      "path": "aperag_deep_dive.md",
+      "accessCount": 1,
+      "lastAccessed": 1774204205664,
+      "type": "file"
+    },
+    {
+      "path": ".markdownlintignore",
+      "accessCount": 1,
+      "lastAccessed": 1774255112362,
+      "type": "file"
+    },
+    {
+      "path": "lychee.toml",
+      "accessCount": 1,
+      "lastAccessed": 1774255291733,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
